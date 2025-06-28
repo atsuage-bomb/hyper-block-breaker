@@ -380,17 +380,16 @@
         // === ゲーム設定 ===
         const brickRowCount = 5; // ブロックの行数
         const brickColumnCount = 8; // ブロックの列数
-        const brickWidth = 75; // ブロックの幅
-        const brickHeight = 20; // ブロックの高さ
-        const brickPadding = 10; // ブロック間のパディング
+        const brickHeight = 20; // ブロックの高さ (固定値)
+        const brickPadding = 5; // ブロック間のパディング (少し小さくして、より多くのブロックが収まるように調整)
         const brickOffsetTop = 30; // 上からのオフセット
-        const brickOffsetLeft = 30; // 左からのオフセット
         const specialBlockHits = 3; // 特殊ブロックを破壊するために必要なヒット数
         const normalBlockScore = 5; // 通常ブロックのスコア
         const specialBlockScore = 15; // 特殊ブロックのスコア
 
-        // === サウンド関連の変数を削除 ===
-        // Tone.jsのライブラリやシンセサイザーの宣言は不要になりました。
+        // 動的に計算されるブロックの幅と左オフセット
+        let dynamicBrickWidth;
+        let currentInitialBrickOffsetLeft;
 
         /**
          * 指定されたタイプのサウンドを再生する関数 (削除されたためダミー関数)
@@ -398,7 +397,6 @@
          */
         function playSound(type) {
             // サウンド機能は削除されたため、何もしません。
-            // console.log(`Sound playback would have occurred for: ${type}`); // デバッグ用
         }
 
         // === パーティクルシステム ===
@@ -458,8 +456,6 @@
             canvas = document.getElementById('gameCanvas');
             ctx = canvas.getContext('2d');
 
-            // Tone.jsシンセサイザーの初期化コードを削除
-
             // キャンバスサイズをレスポンシブに設定し、ウィンドウサイズ変更時に再調整する
             resizeCanvas();
             window.addEventListener('resize', resizeCanvas);
@@ -477,8 +473,6 @@
 
             // 全てのオーバーレイを初期状態で非表示にし、ローディング画面のみ表示
             hideAllOverlays();
-            // initFirebaseのonAuthStateChangedで隠されるため、ここでは非表示にはしない
-            // document.getElementById('loadingScreen').classList.remove('hidden'); // これはinitFirebaseが処理するため、ここでは不要
 
             // イベントリスナーの追加
             document.addEventListener('mousemove', mouseMoveHandler); // マウス移動
@@ -529,13 +523,30 @@
             // 最大高さ400px、利用可能な高さを考慮
             canvas.height = Math.min(400, availableHeight);
 
+            // ブロックの幅を動的に計算 (左右のパディングを考慮)
+            // 例: (キャンバス幅 - (ブロック数 + 1) * ブロック間のパディング) / ブロック数
+            // この計算で、両端に brickPadding ほどの余白ができるようにする
+            dynamicBrickWidth = (canvas.width - (brickColumnCount + 1) * brickPadding) / brickColumnCount;
+            dynamicBrickWidth = Math.max(10, dynamicBrickWidth); // 各ブロックの最小幅を保証
+
+            // ブロックのグリッド全体を中央揃えにするための左オフセットを計算
+            const actualTotalGridWidth = (brickColumnCount * dynamicBrickWidth) + ((brickColumnCount - 1) * brickPadding);
+            currentInitialBrickOffsetLeft = (canvas.width - actualTotalGridWidth) / 2;
+            // 計算結果がマイナスになる場合（グリッドがキャンバスより広い場合）、最小限のパディングを設定
+            if (currentInitialBrickOffsetLeft < 0) {
+                currentInitialBrickOffsetLeft = brickPadding;
+            }
+
             // パドルとボールの位置を再計算（ゲームが既に初期化されている場合）
+            // 初回描画前はpaddle.xが0なので、条件分岐
             if (paddle.x !== 0) {
                 paddle.x = (canvas.width - paddle.width) / 2;
                 paddle.y = canvas.height - paddle.height - 10;
                 ball.x = canvas.width / 2;
                 ball.y = paddle.y - ball.radius;
             }
+            // ブロックの再生成も必要（位置と幅が変更されたため）
+            createBricks();
         }
 
         /**
@@ -703,9 +714,15 @@
                 bricks[c] = [];
                 for (let r = 0; r < brickRowCount; r++) {
                     const isSpecial = Math.random() < 0.2; // 20%の確率で特殊ブロックを生成
+                    // ブロックのX, Y座標を動的に設定
+                    const brickX = currentInitialBrickOffsetLeft + (c * (dynamicBrickWidth + brickPadding));
+                    const brickY = (r * (brickHeight + brickPadding)) + brickOffsetTop;
+
                     bricks[c][r] = {
-                        x: 0,
-                        y: 0,
+                        x: brickX,
+                        y: brickY,
+                        width: dynamicBrickWidth, // 動的に計算された幅を使用
+                        height: brickHeight, // 固定の高さを使用
                         status: 1, // 1: アクティブ, 0: 破壊済み
                         isSpecial: isSpecial,
                         hitsLeft: isSpecial ? specialBlockHits : 1 // 特殊ブロックは複数回ヒットが必要
@@ -735,12 +752,9 @@
                 for (let r = 0; r < brickRowCount; r++) {
                     const b = bricks[c][r];
                     if (b.status === 1) { // アクティブなブロックのみ描画
-                        const brickX = (c * (brickWidth + brickPadding)) + brickOffsetLeft;
-                        const brickY = (r * (brickHeight + brickPadding)) + brickOffsetTop;
-                        b.x = brickX;
-                        b.y = brickY;
                         ctx.beginPath();
-                        ctx.rect(brickX, brickY, brickWidth, brickHeight);
+                        // ブロックオブジェクトに保存されているx, y, width, heightを使用
+                        ctx.rect(b.x, b.y, b.width, b.height);
                         ctx.fillStyle = getBlockColor(b); // ブロックの色を設定
                         ctx.fill();
                         ctx.closePath();
@@ -750,7 +764,7 @@
                             ctx.font = "12px Inter";
                             ctx.fillStyle = "white";
                             ctx.textAlign = "center";
-                            ctx.fillText(b.hitsLeft, brickX + brickWidth / 2, brickY + brickHeight / 2 + 5);
+                            ctx.fillText(b.hitsLeft, b.x + b.width / 2, b.y + b.height / 2 + 5);
                         }
                     }
                 }
@@ -794,15 +808,15 @@
             // 壁との衝突
             if (ball.x + ball.radius > canvas.width || ball.x - ball.radius < 0) {
                 ball.dx = -ball.dx; // X方向の速度を反転
-                playSound('blockHit'); // 壁に当たった音
+                // playSound('blockHit'); // 音機能削除
             }
             if (ball.y - ball.radius < 0) {
                 ball.dy = -ball.dy; // Y方向の速度を反転
-                playSound('blockHit'); // 天井に当たった音
+                // playSound('blockHit'); // 音機能削除
             } else if (ball.y + ball.radius > canvas.height) {
                 // ボールが画面下部に到達（パドルをミス）
                 lives--; // ライフを減らす
-                playSound('gameOver'); // ゲームオーバー音（ライフが0でなくても再生）
+                // playSound('gameOver'); // 音機能削除
                 updateLivesDisplay(); // ライフ表示を更新
                 if (lives === 0) {
                     // ライフがなくなったらゲームオーバー
@@ -832,7 +846,7 @@
                 // パドルのどこに当たったかに応じてボールのX方向速度を調整
                 const hitPoint = ball.x - (paddle.x + paddle.width / 2); // パドル中心からの距離
                 ball.dx = hitPoint * 0.15; // 距離に応じてX方向速度を強くする
-                playSound('blockHit'); // パドルに当たった音
+                // playSound('blockHit'); // 音機能削除
             }
 
             // ブロックとの衝突
@@ -840,10 +854,11 @@
                 for (let r = 0; r < brickRowCount; r++) {
                     const b = bricks[c][r];
                     if (b.status === 1) { // アクティブなブロックのみ判定
+                        // ブロックオブジェクトの幅と高さを参照するように変更
                         if (ball.x + ball.radius > b.x &&
-                            ball.x - ball.radius < b.x + brickWidth &&
+                            ball.x - ball.radius < b.x + b.width &&
                             ball.y + ball.radius > b.y &&
-                            ball.y - ball.radius < b.y + brickHeight) {
+                            ball.y - ball.radius < b.y + b.height) {
 
                             ball.dy = -ball.dy; // ボールのY方向速度を反転
 
@@ -852,17 +867,17 @@
                                 if (b.hitsLeft === 0) {
                                     b.status = 0; // 特殊ブロックを破壊済みにする
                                     score += specialBlockScore; // 特殊ブロックのスコアを加算
-                                    playSound('blockDestroy'); // 破壊音
-                                    createParticles(b.x + brickWidth / 2, b.y + brickHeight / 2, 25, "#FF4500"); // 赤系のパーティクル
+                                    // playSound('blockDestroy'); // 音機能削除
+                                    createParticles(b.x + b.width / 2, b.y + b.height / 2, 25, "#FF4500"); // 赤系のパーティクル
                                 } else {
-                                    playSound('specialBlockDeflect'); // 跳ね返り音
-                                    createParticles(b.x + brickWidth / 2, b.y + brickHeight / 2, 10, getBlockColor(b)); // 特殊ブロックの色に合わせたパーティクル
+                                    // playSound('specialBlockDeflect'); // 音機能削除
+                                    createParticles(b.x + b.width / 2, b.y + b.height / 2, 10, getBlockColor(b)); // 特殊ブロックの色に合わせたパーティクル
                                 }
                             } else {
                                 b.status = 0; // 通常ブロックを破壊済みにする
                                 score += normalBlockScore; // 通常ブロックのスコアを加算
-                                playSound('blockDestroy'); // 破壊音
-                                createParticles(b.x + brickWidth / 2, b.y + brickHeight / 2, 15, "#0095DD"); // 青系のパーティクル
+                                // playSound('blockDestroy'); // 音機能削除
+                                createParticles(b.x + b.width / 2, b.y + b.height / 2, 15, "#0095DD"); // 青系のパーティクル
                             }
                             updateScoreDisplay(); // スコア表示を更新
                             checkWin(); // ゲームクリア判定
@@ -888,7 +903,7 @@
             if (activeBlocks === 0) {
                 gameWon = true; // ゲームクリアフラグを立てる
                 gameRunning = false; // ゲームを停止
-                playSound('gameClear'); // ゲームクリア音を再生
+                // playSound('gameClear'); // 音機能削除
                 document.getElementById('finalScoreGameClear').textContent = score; // 最終スコアを表示
                 document.getElementById('gameClearScreen').classList.remove('hidden'); // ゲームクリア画面を表示
                 saveScore(); // スコアを保存
