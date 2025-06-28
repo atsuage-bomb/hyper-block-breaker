@@ -1,0 +1,1013 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>強化版ブロック崩しゲーム</title>
+    <!-- Tailwind CSS CDN for quick styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter font for clean UI -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
+    <!-- Firebase SDKs for score ranking -->
+    <script type="module">
+        // Firebase SDKsをインポート
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, addDoc, onSnapshot, collection, query, limit } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase関連のグローバル変数を宣言
+        // これらはウィンドウオブジェクトにアタッチされ、ゲームロジックからアクセス可能になります
+        window.firebaseApp = null;
+        window.db = null;
+        window.auth = null;
+        window.userId = null;
+        window.isAuthReady = false;
+
+        // Firestoreの関数をグローバルスコープに公開する
+        // これにより、メインのスクリプトブロックからこれらの関数にアクセスできるようになる
+        window.firestoreCollection = collection;
+        window.firestoreQuery = query;
+        window.firestoreLimit = limit;
+        window.firestoreAddDoc = addDoc;
+        window.firestoreOnSnapshot = onSnapshot;
+
+
+        /**
+         * Firebaseを初期化し、ユーザー認証状態を監視する関数
+         * Canvas環境から提供される__app_id, __firebase_config, __initial_auth_tokenを使用します
+         */
+        async function initFirebase() {
+            try {
+                // アプリケーションIDとFirebase設定を安全に取得
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+                // Firebase設定が有効でない場合はエラーを出力して終了
+                if (Object.keys(firebaseConfig).length === 0) {
+                    console.error("Firebase config is missing. Cannot initialize Firebase.");
+                    document.getElementById('loadingScreen').classList.add('hidden');
+                    document.getElementById('user-id-display').textContent = `Firebase初期化エラー: 設定なし`;
+                    return;
+                }
+
+                // FirebaseアプリとFirestore、Authサービスを初期化
+                window.firebaseApp = initializeApp(firebaseConfig);
+                window.db = getFirestore(window.firebaseApp);
+                window.auth = getAuth(window.firebaseApp);
+
+                // 認証状態の変更を監視
+                onAuthStateChanged(window.auth, async (user) => {
+                    if (user) {
+                        // ユーザーがログインしている場合、ユーザーIDを設定
+                        window.userId = user.uid;
+                        document.getElementById('user-id-display').textContent = `ユーザーID: ${window.userId}`;
+                        console.log("Firebase Auth State Changed: User logged in", window.userId);
+                    } else {
+                        // ユーザーがログインしていない場合、カスタムトークンまたは匿名でサインインを試みる
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            try {
+                                await signInWithCustomToken(window.auth, __initial_auth_token);
+                                console.log("Signed in with custom token.");
+                            } catch (error) {
+                                // auth/invalid-claims エラーの場合、より分かりやすいメッセージをログに出力
+                                if (error.code === 'auth/invalid-claims') {
+                                    console.warn("Firebase authentication failed with 'invalid-claims'. This often happens when the provided custom token is expired or invalid from the Canvas environment. Attempting anonymous sign-in as a fallback.");
+                                } else {
+                                    console.error("Error signing in with custom token:", error);
+                                }
+                                await signInAnonymously(window.auth);
+                                console.log("Signed in anonymously due to custom token error.");
+                            }
+                        } else {
+                            await signInAnonymously(window.auth);
+                            console.log("Signed in anonymously.");
+                        }
+                    }
+                    // 認証準備完了フラグを設定
+                    window.isAuthReady = true;
+                    // Firebase準備完了後の処理を呼び出す（もし定義されていれば）
+                    if (window.onFirebaseReady) {
+                        window.onFirebaseReady();
+                    }
+                    // 認証状態に関わらず、ローディング画面を非表示にする
+                    document.getElementById('loadingScreen').classList.add('hidden');
+                });
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                document.getElementById('loadingScreen').classList.add('hidden');
+                document.getElementById('user-id-display').textContent = `Firebase初期化エラー: ${error.message}`;
+            }
+        }
+
+        // DOMContentLoadedイベントでFirebase初期化関数を呼び出す
+        document.addEventListener('DOMContentLoaded', initFirebase);
+    </script>
+    <style>
+        /* Base styles for the body */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1a202c; /* Dark background */
+            color: #e2e8f0; /* Light text */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh; /* Full viewport height */
+            margin: 0;
+            overflow: hidden; /* Prevent scrolling */
+        }
+        /* Styling for the game canvas */
+        canvas {
+            background-color: #2d3748; /* Slightly lighter dark */
+            display: block;
+            border-radius: 1rem; /* Rounded corners for modern look */
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5); /* Subtle shadow */
+            margin-bottom: 1rem;
+        }
+        /* Container for the entire game UI */
+        .game-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 1rem;
+            max-width: 90vw; /* Max width relative to viewport */
+            box-sizing: border-box; /* Include padding in width calculation */
+            width: 100%; /* Ensure it takes full width of its parent */
+        }
+        /* Common styles for UI panels */
+        .score-board, .controls, .score-ranking {
+            background-color: #2d3748; /* Dark panel background */
+            padding: 1rem;
+            border-radius: 0.75rem; /* Rounded corners */
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.3); /* Panel shadow */
+            margin-bottom: 1rem;
+            width: 100%;
+            max-width: 600px; /* Max width for panels */
+        }
+        /* Button styling */
+        .controls button {
+            background-color: #4299e1; /* Blue button */
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.5rem;
+            font-weight: bold;
+            transition: background-color 0.2s, transform 0.2s; /* Smooth transitions */
+            cursor: pointer;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); /* Button shadow */
+        }
+        .controls button:hover {
+            background-color: #3182ce; /* Darker blue on hover */
+            transform: scale(1.05); /* Slight scale up on hover */
+        }
+        /* Score ranking table styling */
+        .score-ranking table {
+            width: 100%;
+            border-collapse: collapse; /* Collapse borders */
+        }
+        .score-ranking th, .score-ranking td {
+            padding: 0.5rem;
+            text-align: left;
+            border-bottom: 1px solid #4a5568; /* Subtle border for rows */
+        }
+        .score-ranking th {
+            color: #a0aec0; /* Lighter gray for headers */
+        }
+        /* Game overlay screens (Game Over, Game Clear, Pause, Loading) */
+        .game-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7); /* Semi-transparent black overlay */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            z-index: 10; /* Bring to front */
+            border-radius: 1rem; /* Match canvas border-radius */
+            transition: opacity 0.3s ease-in-out; /* Fade in/out effect */
+        }
+        .game-overlay.hidden {
+            opacity: 0;
+            pointer-events: none; /* Disable interaction when hidden */
+        }
+        .game-overlay-content {
+            background-color: #2d3748;
+            padding: 2rem;
+            border-radius: 1rem;
+            text-align: center;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.7);
+            transform: translateY(-20px); /* Slightly move up for effect */
+            transition: transform 0.3s ease-in-out;
+        }
+        .game-overlay.hidden .game-overlay-content {
+            transform: translateY(0);
+        }
+        .game-overlay-content h2 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            color: #ed8936; /* Orange for emphasis */
+            animation: bounceIn 0.8s ease-out; /* Simple entry animation */
+        }
+        .game-overlay-content button {
+            background-color: #48bb78; /* Green button */
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.5rem;
+            font-weight: bold;
+            transition: background-color 0.2s, transform 0.2s;
+            cursor: pointer;
+            margin-top: 1rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .game-overlay-content button:hover {
+            background-color: #38a169; /* Darker green on hover */
+            transform: scale(1.05);
+        }
+        /* User ID display */
+        #user-id-display {
+            font-size: 0.8rem;
+            color: #a0aec0;
+            margin-top: 0.5rem;
+            word-break: break-all; /* Break long IDs */
+            text-align: center;
+        }
+
+        /* Responsive adjustments for smaller screens (e.g., mobile) */
+        @media (max-width: 768px) {
+            .game-container {
+                padding: 0.5rem; /* Less padding on smaller screens */
+            }
+            .score-board, .controls, .score-ranking {
+                padding: 0.75rem;
+                margin-bottom: 0.75rem;
+            }
+            .controls button {
+                padding: 0.6rem 1.2rem;
+                font-size: 0.9rem;
+            }
+            .game-overlay-content h2 {
+                font-size: 2rem; /* Smaller heading on mobile */
+            }
+            .game-overlay-content button {
+                padding: 0.6rem 1.2rem;
+                font-size: 0.9rem;
+            }
+            #user-id-display {
+                font-size: 0.7rem;
+            }
+        }
+
+        /* Keyframe animations for game clear/over screens */
+        @keyframes bounceIn {
+            0% { transform: scale(0.5); opacity: 0; }
+            50% { transform: scale(1.1); opacity: 1; }
+            100% { transform: scale(1); }
+        }
+        .game-over-screen .game-overlay-content h2,
+        .game-clear-screen .game-overlay-content h2 {
+            animation: bounceIn 0.8s ease-out;
+        }
+    </style>
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-gray-200">
+    <div class="game-container flex flex-col items-center p-4 max-w-screen-lg w-full box-border">
+        <h1 class="text-3xl font-bold mb-4 text-orange-400">強化版ブロック崩し！</h1>
+
+        <!-- Score and Lives display -->
+        <div class="score-board flex justify-between w-full p-4 rounded-xl shadow-lg bg-gray-700 mb-4">
+            <div class="text-xl font-bold">スコア: <span id="score">0</span></div>
+            <div class="text-xl font-bold">ライフ: <span id="lives">3</span></div>
+        </div>
+
+        <!-- Game Canvas -->
+        <canvas id="gameCanvas" class="rounded-xl shadow-2xl mb-4"></canvas>
+
+        <!-- Game Controls -->
+        <div class="controls flex justify-center space-x-4 w-full p-4 rounded-xl shadow-lg bg-gray-700 mb-4">
+            <button id="startButton" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-lg transition duration-200 ease-in-out transform hover:scale-105">ゲーム開始</button>
+            <button id="pauseButton" class="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-3 px-6 rounded-lg transition duration-200 ease-in-out transform hover:scale-105">一時停止</button>
+        </div>
+
+        <!-- High Score Ranking -->
+        <div class="score-ranking w-full p-4 rounded-xl shadow-lg bg-gray-700">
+            <h2 class="text-2xl font-bold mb-3 text-center text-green-400">ハイスコアランキング</h2>
+            <div id="loadingScores" class="text-center text-gray-400 mb-2">スコアを読み込み中...</div>
+            <table class="w-full text-left">
+                <thead>
+                    <tr>
+                        <th class="py-2 border-b border-gray-600 text-gray-400">順位</th>
+                        <th class="py-2 border-b border-gray-600 text-gray-400">ユーザーID</th>
+                        <th class="py-2 border-b border-gray-600 text-gray-400">スコア</th>
+                    </tr>
+                </thead>
+                <tbody id="scoreTableBody">
+                    <!-- Scores will be loaded here by JavaScript -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- User ID Display (for debugging/identification in multi-user context) -->
+        <div id="user-id-display" class="text-sm text-gray-400 mt-2">ユーザーID: ロード中...</div>
+
+        <!-- Game Over Screen Overlay -->
+        <div id="gameOverScreen" class="game-overlay hidden">
+            <div class="game-overlay-content">
+                <h2 class="text-red-500">ゲームオーバー！</h2>
+                <p class="text-xl mb-4">あなたのスコア: <span id="finalScoreGameOver" class="font-bold">0</span></p>
+                <button id="restartButtonGameOver">もう一度プレイ</button>
+            </div>
+        </div>
+
+        <!-- Game Clear Screen Overlay -->
+        <div id="gameClearScreen" class="game-overlay hidden">
+            <div class="game-overlay-content">
+                <h2 class="text-green-500">ゲームクリア！</h2>
+                <p class="text-xl mb-4">あなたのスコア: <span id="finalScoreGameClear" class="font-bold">0</span></p>
+                <button id="restartButtonGameClear">もう一度プレイ</button>
+            </div>
+        </div>
+
+        <!-- Pause Screen Overlay -->
+        <div id="pauseScreen" class="game-overlay hidden">
+            <div class="game-overlay-content">
+                <h2 class="text-yellow-400">一時停止中</h2>
+                <button id="resumeButton">ゲームを再開</button>
+            </div>
+        </div>
+
+        <!-- Loading Screen Overlay (shown until Firebase is ready) -->
+        <div id="loadingScreen" class="game-overlay">
+            <div class="game-overlay-content">
+                <h2 class="text-blue-400">準備中...</h2>
+                <p>ゲームのロードとFirebase認証を待っています。</p>
+                <p class="text-sm text-gray-400 mt-2">（時間がかかる場合があります）</p>
+            </div>
+        </div>
+    </div>
+    <script>
+        // === グローバルゲーム変数 ===
+        let canvas, ctx; // キャンバス要素とその2D描画コンテキスト
+        let score = 0; // 現在のスコア
+        let lives = 3; // 残りライフ
+        let paddle = { // パドルオブジェクト
+            width: 100,
+            height: 20,
+            x: 0, // 動的に設定される
+            y: 0, // 動的に設定される
+            dx: 7 // パドルの移動速度
+        };
+        let ball = { // ボールオブジェクト
+            radius: 10,
+            x: 0, // 動的に設定される
+            y: 0, // 動的に設定される
+            dx: 4, // ボールのX方向速度
+            dy: -4 // ボールのY方向速度
+        };
+        let bricks = []; // ブロックの配列
+        let particles = []; // パーティクルの配列（破壊エフェクト用）
+        let gameRunning = false; // ゲームが実行中かどうかのフラグ
+        let gameOver = false; // ゲームオーバーフラグ
+        let gameWon = false; // ゲームクリアフラグ
+        let animationFrameId; // requestAnimationFrameのID（一時停止・停止用）
+        let isPaused = false; // 一時停止フラグ
+        let touchX = null; // モバイルでのパドル制御用タッチ座標
+
+        // Firebase関連の変数（`initFirebase`モジュールスクリプトからグローバルに設定される）
+        let db, auth, userId, isAuthReady;
+        let publicScoresRef; // 公開スコアコレクションへの参照
+
+        // === ゲーム設定 ===
+        const brickRowCount = 5; // ブロックの行数
+        const brickColumnCount = 8; // ブロックの列数
+        const brickWidth = 75; // ブロックの幅
+        const brickHeight = 20; // ブロックの高さ
+        const brickPadding = 10; // ブロック間のパディング
+        const brickOffsetTop = 30; // 上からのオフセット
+        const brickOffsetLeft = 30; // 左からのオフセット
+        const specialBlockHits = 3; // 特殊ブロックを破壊するために必要なヒット数
+        const normalBlockScore = 5; // 通常ブロックのスコア
+        const specialBlockScore = 15; // 特殊ブロックのスコア
+
+        // === サウンド関連の変数を削除 ===
+        // Tone.jsのライブラリやシンセサイザーの宣言は不要になりました。
+
+        /**
+         * 指定されたタイプのサウンドを再生する関数 (削除されたためダミー関数)
+         * @param {string} type - 再生するサウンドの種類
+         */
+        function playSound(type) {
+            // サウンド機能は削除されたため、何もしません。
+            // console.log(`Sound playback would have occurred for: ${type}`); // デバッグ用
+        }
+
+        // === パーティクルシステム ===
+        /**
+         * パーティクルを表すクラス
+         */
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.size = Math.random() * 4 + 1; // ランダムなサイズ
+                this.color = color;
+                this.vx = (Math.random() - 0.5) * 6; // X方向のランダムな速度
+                this.vy = (Math.random() - 0.5) * 6; // Y方向のランダムな速度
+                this.alpha = 1; // 透明度
+                this.gravity = 0.15; // 重力
+                this.fadeRate = 0.03; // フェードアウト速度
+            }
+
+            /** パーティクルの状態を更新する */
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vy += this.gravity; // 重力を適用
+                this.alpha -= this.fadeRate; // 徐々に透明にする
+            }
+
+            /** パーティクルを描画する */
+            draw() {
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, this.alpha); // 透明度を適用（0以下にならないように）
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        /**
+         * 指定された位置にパーティクルを生成する関数
+         * @param {number} x - 中心X座標
+         * @param {number} y - 中心Y座標
+         * @param {number} count - 生成するパーティクルの数
+         * @param {string} color - パーティクルの色
+         */
+        function createParticles(x, y, count, color) {
+            for (let i = 0; i < count; i++) {
+                particles.push(new Particle(x, y, color));
+            }
+        }
+
+        /**
+         * ゲームを初期化する関数（DOMContentLoaded後に呼び出される）
+         */
+        function initGame() {
+            canvas = document.getElementById('gameCanvas');
+            ctx = canvas.getContext('2d');
+
+            // Tone.jsシンセサイザーの初期化コードを削除
+
+            // キャンバスサイズをレスポンシブに設定し、ウィンドウサイズ変更時に再調整する
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+
+            // パドルとボールの初期位置を設定
+            paddle.x = (canvas.width - paddle.width) / 2;
+            paddle.y = canvas.height - paddle.height - 10;
+            ball.x = canvas.width / 2;
+            ball.y = paddle.y - ball.radius;
+
+            createBricks(); // ブロックを生成
+            resetGameStates(); // ゲームの状態をリセット
+            updateScoreDisplay(); // スコア表示を更新
+            updateLivesDisplay(); // ライフ表示を更新
+
+            // 全てのオーバーレイを初期状態で非表示にし、ローディング画面のみ表示
+            hideAllOverlays();
+            // initFirebaseのonAuthStateChangedで隠されるため、ここでは非表示にはしない
+            // document.getElementById('loadingScreen').classList.remove('hidden'); // これはinitFirebaseが処理するため、ここでは不要
+
+            // イベントリスナーの追加
+            document.addEventListener('mousemove', mouseMoveHandler); // マウス移動
+            document.addEventListener('keydown', keyDownHandler); // キーボード押下
+            document.addEventListener('keyup', keyUpHandler); // キーボード離し
+
+            // モバイルタッチコントロール用
+            canvas.addEventListener('touchstart', touchStartHandler, { passive: false }); // タッチ開始
+            canvas.addEventListener('touchmove', touchMoveHandler, { passive: false }); // タッチ移動
+            canvas.addEventListener('touchend', touchEndHandler); // タッチ終了
+
+            // ボタンクリックイベント
+            document.getElementById('startButton').addEventListener('click', startGame); // ゲーム開始ボタン
+            document.getElementById('pauseButton').addEventListener('click', togglePause); // 一時停止ボタン
+            document.getElementById('restartButtonGameOver').addEventListener('click', startGame); // ゲームオーバー後の再開ボタン
+            document.getElementById('restartButtonGameClear').addEventListener('click', startGame); // ゲームクリア後の再開ボタン
+            document.getElementById('resumeButton').addEventListener('click', togglePause); // 一時停止中の再開ボタン
+
+            // Firebaseの準備が完了した後に呼ばれるコールバックを設定
+            window.onFirebaseReady = () => {
+                db = window.db;
+                auth = window.auth;
+                userId = window.userId;
+                isAuthReady = window.isAuthReady;
+
+                if (isAuthReady) {
+                    // Firebase認証が完了していれば、公開スコアコレクションへの参照を設定
+                    // window.firestoreCollection を使用する
+                    publicScoresRef = window.firestoreCollection(db, `artifacts/${window.__app_id}/public/data/blockBreakerScores`);
+                    loadHighScores(); // ハイスコアを読み込む
+                } else {
+                    console.error("Firebase Auth not ready after init.");
+                    document.getElementById('user-id-display').textContent = `ユーザーID: 認証失敗`;
+                }
+            };
+        }
+
+
+        /**
+         * キャンバスサイズをレスポンシブに調整する関数
+         */
+        function resizeCanvas() {
+            const containerWidth = document.querySelector('.game-container').clientWidth;
+            const availableHeight = window.innerHeight * 0.6; // 画面高さの60%をキャンバスに割り当てる
+
+            // 最大幅600px、最小幅はコンテナ幅からパディングを引いた値
+            canvas.width = Math.min(600, containerWidth - 32);
+            // 最大高さ400px、利用可能な高さを考慮
+            canvas.height = Math.min(400, availableHeight);
+
+            // パドルとボールの位置を再計算（ゲームが既に初期化されている場合）
+            if (paddle.x !== 0) {
+                paddle.x = (canvas.width - paddle.width) / 2;
+                paddle.y = canvas.height - paddle.height - 10;
+                ball.x = canvas.width / 2;
+                ball.y = paddle.y - ball.radius;
+            }
+        }
+
+        /**
+         * ゲームの状態をリセットする関数
+         */
+        function resetGameStates() {
+            score = 0;
+            lives = 3;
+            gameRunning = false;
+            gameOver = false;
+            gameWon = false;
+            isPaused = false;
+            particles = []; // パーティクルをクリア
+
+            // ボールとパドルの位置を初期化
+            ball.x = canvas.width / 2;
+            ball.y = paddle.y - ball.radius;
+            ball.dx = 4;
+            ball.dy = -4; // 上向きに開始
+            paddle.x = (canvas.width - paddle.width) / 2;
+
+            createBricks(); // 全てのブロックを再生成
+            updateScoreDisplay();
+            updateLivesDisplay();
+        }
+
+        /**
+         * ゲームを開始する関数
+         */
+        function startGame() {
+            hideAllOverlays(); // 全てのオーバーレイを非表示にする
+            resetGameStates(); // ゲームの状態をリセット
+            gameRunning = true; // ゲームを走行中にする
+            loop(); // ゲームループを開始
+        }
+
+        /**
+         * ゲームの一時停止/再開を切り替える関数
+         */
+        function togglePause() {
+            // ゲームがまだ始まっていない、または既に終了している場合は一時停止できない
+            if (!gameRunning && !gameOver && !gameWon) {
+                return;
+            }
+
+            isPaused = !isPaused; // フラグを反転
+            if (isPaused) {
+                cancelAnimationFrame(animationFrameId); // アニメーションフレームをキャンセルしてゲームループを停止
+                document.getElementById('pauseScreen').classList.remove('hidden'); // 一時停止画面を表示
+            } else {
+                document.getElementById('pauseScreen').classList.add('hidden'); // 一時停止画面を非表示
+                loop(); // ゲームループを再開
+            }
+        }
+
+        /** 全てのオーバーレイを非表示にするヘルパー関数 */
+        function hideAllOverlays() {
+            document.getElementById('gameOverScreen').classList.add('hidden');
+            document.getElementById('gameClearScreen').classList.add('hidden');
+            document.getElementById('pauseScreen').classList.add('hidden');
+            document.getElementById('loadingScreen').classList.add('hidden');
+        }
+
+        /** スコア表示を更新する */
+        function updateScoreDisplay() {
+            document.getElementById('score').textContent = score;
+        }
+
+        /** ライフ表示を更新する */
+        function updateLivesDisplay() {
+            document.getElementById('lives').textContent = lives;
+        }
+
+        // === 入力制御 ===
+        let rightPressed = false; // 右キーが押されているか
+        let leftPressed = false; // 左キーが押されているか
+
+        /** キーが押された時のハンドラー */
+        function keyDownHandler(e) {
+            if (e.key === "Right" || e.key === "ArrowRight") {
+                rightPressed = true;
+            } else if (e.key === "Left" || e.key === "ArrowLeft") {
+                leftPressed = true;
+            } else if (e.key === "p" || e.key === "P" || e.key === " " ) { // 'p' またはスペースキーで一時停止
+                togglePause();
+            }
+        }
+
+        /** キーが離された時のハンドラー */
+        function keyUpHandler(e) {
+            if (e.key === "Right" || e.key === "ArrowRight") {
+                rightPressed = false;
+            } else if (e.key === "Left" || e.key === "ArrowLeft") {
+                leftPressed = false;
+            }
+        }
+
+        /** マウス移動時のハンドラー（PC用パドル制御） */
+        function mouseMoveHandler(e) {
+            let relativeX = e.clientX - canvas.getBoundingClientRect().left; // キャンバス内の相対X座標
+            if (relativeX > 0 && relativeX < canvas.width) {
+                paddle.x = relativeX - paddle.width / 2; // パドルの中心をマウス位置に合わせる
+            }
+        }
+
+        /** タッチ開始時のハンドラー（モバイル用パドル制御） */
+        function touchStartHandler(e) {
+            e.preventDefault(); // スクロールを防ぐ
+            if (e.touches.length > 0) {
+                touchX = e.touches[0].clientX; // 最初のタッチのX座標を記録
+            }
+        }
+
+        /** タッチ移動時のハンドラー（モバイル用パドル制御） */
+        function touchMoveHandler(e) {
+            e.preventDefault(); // スクロールを防ぐ
+            if (touchX !== null && e.touches.length > 0) {
+                let currentTouchX = e.touches[0].clientX;
+                let deltaX = currentTouchX - touchX; // 移動量
+                paddle.x += deltaX * (canvas.width / window.innerWidth); // パドルの位置を移動量に応じて更新。キャンバスとウィンドウの比率で調整
+                touchX = currentTouchX;
+
+                // パドルがキャンバスの境界内に留まるようにする
+                if (paddle.x < 0) {
+                    paddle.x = 0;
+                }
+                if (paddle.x + paddle.width > canvas.width) {
+                    paddle.x = canvas.width - paddle.width;
+                }
+            }
+        }
+
+        /** タッチ終了時のハンドラー */
+        function touchEndHandler(e) {
+            touchX = null; // タッチ座標をリセット
+        }
+
+        // === ゲーム描画関数 ===
+        /** ボールを描画する */
+        function drawBall() {
+            ctx.beginPath();
+            ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+            ctx.fillStyle = "#FFD700"; // ボールを金色に設定
+            ctx.fill();
+            ctx.closePath();
+        }
+
+        /** パドルを描画する */
+        function drawPaddle() {
+            ctx.beginPath();
+            ctx.rect(paddle.x, paddle.y, paddle.width, paddle.height);
+            ctx.fillStyle = "#00BFFF"; // パドルを深い青色に設定
+            ctx.fill();
+            ctx.closePath();
+        }
+
+        /**
+         * ブロックを生成する関数
+         * 各ブロックには、通常ブロック（status: 1, hitsLeft: 1）または
+         * 特殊ブロック（isSpecial: true, hitsLeft: specialBlockHits）がランダムに割り当てられる
+         */
+        function createBricks() {
+            bricks = []; // ブロック配列をクリア
+            for (let c = 0; c < brickColumnCount; c++) {
+                bricks[c] = [];
+                for (let r = 0; r < brickRowCount; r++) {
+                    const isSpecial = Math.random() < 0.2; // 20%の確率で特殊ブロックを生成
+                    bricks[c][r] = {
+                        x: 0,
+                        y: 0,
+                        status: 1, // 1: アクティブ, 0: 破壊済み
+                        isSpecial: isSpecial,
+                        hitsLeft: isSpecial ? specialBlockHits : 1 // 特殊ブロックは複数回ヒットが必要
+                    };
+                }
+            }
+        }
+
+        /**
+         * ブロックの状態に応じた色を取得する関数
+         * @param {object} block - ブロックオブジェクト
+         * @returns {string} - 描画する色（CSSカラーコード）
+         */
+        function getBlockColor(block) {
+            if (block.isSpecial) {
+                // 特殊ブロックは残りヒット数に応じて色を変える
+                if (block.hitsLeft === 3) return "#FF6347"; // 赤系 (最初の状態)
+                if (block.hitsLeft === 2) return "#FF4500"; // オレンジ赤系 (1回ヒット後)
+                if (block.hitsLeft === 1) return "#DC143C"; // クリムゾン系 (2回ヒット後、次で破壊)
+            }
+            return "#0095DD"; // 通常ブロックの色 (青)
+        }
+
+        /** 全てのブロックを描画する */
+        function drawBricks() {
+            for (let c = 0; c < brickColumnCount; c++) {
+                for (let r = 0; r < brickRowCount; r++) {
+                    const b = bricks[c][r];
+                    if (b.status === 1) { // アクティブなブロックのみ描画
+                        const brickX = (c * (brickWidth + brickPadding)) + brickOffsetLeft;
+                        const brickY = (r * (brickHeight + brickPadding)) + brickOffsetTop;
+                        b.x = brickX;
+                        b.y = brickY;
+                        ctx.beginPath();
+                        ctx.rect(brickX, brickY, brickWidth, brickHeight);
+                        ctx.fillStyle = getBlockColor(b); // ブロックの色を設定
+                        ctx.fill();
+                        ctx.closePath();
+
+                        // 特殊ブロックで、まだ破壊されていない場合は残りヒット数を表示
+                        if (b.isSpecial && b.hitsLeft > 0) {
+                            ctx.font = "12px Inter";
+                            ctx.fillStyle = "white";
+                            ctx.textAlign = "center";
+                            ctx.fillText(b.hitsLeft, brickX + brickWidth / 2, brickY + brickHeight / 2 + 5);
+                        }
+                    }
+                }
+            }
+        }
+
+        /** パーティクルを描画・更新する */
+        function drawParticles() {
+            // 後ろからループして、ライフサイクルが終了したパーティクルを削除
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.update(); // 状態更新
+                p.draw(); // 描画
+                if (p.alpha <= 0 || p.size <= 0) { // 透明度が0以下、またはサイズが0以下のパーティクルを削除
+                    particles.splice(i, 1);
+                }
+            }
+        }
+
+        // === ゲームロジック関数 ===
+        /** パドルを移動する */
+        function movePaddle() {
+            if (rightPressed && paddle.x < canvas.width - paddle.width) {
+                paddle.x += paddle.dx;
+            } else if (leftPressed && paddle.x > 0) {
+                paddle.x -= paddle.dx;
+            }
+        }
+
+        /** ボールを移動する */
+        function moveBall() {
+            ball.x += ball.dx;
+            ball.y += ball.dy;
+        }
+
+        /**
+         * 衝突判定を行う
+         * (壁、パドル、ブロックとの衝突を処理)
+         */
+        function collisionDetection() {
+            // 壁との衝突
+            if (ball.x + ball.radius > canvas.width || ball.x - ball.radius < 0) {
+                ball.dx = -ball.dx; // X方向の速度を反転
+                playSound('blockHit'); // 壁に当たった音
+            }
+            if (ball.y - ball.radius < 0) {
+                ball.dy = -ball.dy; // Y方向の速度を反転
+                playSound('blockHit'); // 天井に当たった音
+            } else if (ball.y + ball.radius > canvas.height) {
+                // ボールが画面下部に到達（パドルをミス）
+                lives--; // ライフを減らす
+                playSound('gameOver'); // ゲームオーバー音（ライフが0でなくても再生）
+                updateLivesDisplay(); // ライフ表示を更新
+                if (lives === 0) {
+                    // ライフがなくなったらゲームオーバー
+                    gameOver = true;
+                    gameRunning = false;
+                    document.getElementById('finalScoreGameOver').textContent = score; // 最終スコアを表示
+                    document.getElementById('gameOverScreen').classList.remove('hidden'); // ゲームオーバー画面を表示
+                    saveScore(); // スコアを保存
+                } else {
+                    // ライフが残っていればボールとパドルをリセットして再開
+                    ball.x = canvas.width / 2;
+                    ball.y = paddle.y - ball.radius;
+                    ball.dx = 4;
+                    ball.dy = -4;
+                    paddle.x = (canvas.width - paddle.width) / 2;
+                }
+            }
+
+            // パドルとの衝突
+            if (ball.y + ball.radius > paddle.y && // ボールがパドルと同じ高さにあるか
+                ball.x - ball.radius < paddle.x + paddle.width && // ボールがパドルの左端と右端の間にあるか
+                ball.x + ball.radius > paddle.x &&
+                ball.y + ball.radius < paddle.y + paddle.height + ball.radius) { // ボールがパドルの上側と衝突したことを確認（パドルの下側からの衝突を防ぐ）
+
+                // ボールのY方向速度を反転
+                ball.dy = -ball.dy;
+                // パドルのどこに当たったかに応じてボールのX方向速度を調整
+                const hitPoint = ball.x - (paddle.x + paddle.width / 2); // パドル中心からの距離
+                ball.dx = hitPoint * 0.15; // 距離に応じてX方向速度を強くする
+                playSound('blockHit'); // パドルに当たった音
+            }
+
+            // ブロックとの衝突
+            for (let c = 0; c < brickColumnCount; c++) {
+                for (let r = 0; r < brickRowCount; r++) {
+                    const b = bricks[c][r];
+                    if (b.status === 1) { // アクティブなブロックのみ判定
+                        if (ball.x + ball.radius > b.x &&
+                            ball.x - ball.radius < b.x + brickWidth &&
+                            ball.y + ball.radius > b.y &&
+                            ball.y - ball.radius < b.y + brickHeight) {
+
+                            ball.dy = -ball.dy; // ボールのY方向速度を反転
+
+                            if (b.isSpecial) {
+                                b.hitsLeft--; // 特殊ブロックのヒット数を減らす
+                                if (b.hitsLeft === 0) {
+                                    b.status = 0; // 特殊ブロックを破壊済みにする
+                                    score += specialBlockScore; // 特殊ブロックのスコアを加算
+                                    playSound('blockDestroy'); // 破壊音
+                                    createParticles(b.x + brickWidth / 2, b.y + brickHeight / 2, 25, "#FF4500"); // 赤系のパーティクル
+                                } else {
+                                    playSound('specialBlockDeflect'); // 跳ね返り音
+                                    createParticles(b.x + brickWidth / 2, b.y + brickHeight / 2, 10, getBlockColor(b)); // 特殊ブロックの色に合わせたパーティクル
+                                }
+                            } else {
+                                b.status = 0; // 通常ブロックを破壊済みにする
+                                score += normalBlockScore; // 通常ブロックのスコアを加算
+                                playSound('blockDestroy'); // 破壊音
+                                createParticles(b.x + brickWidth / 2, b.y + brickHeight / 2, 15, "#0095DD"); // 青系のパーティクル
+                            }
+                            updateScoreDisplay(); // スコア表示を更新
+                            checkWin(); // ゲームクリア判定
+                        }
+                    }
+                }
+            }
+        }
+
+        /**
+         * ゲームクリア判定を行う関数
+         * 全てのブロックが破壊されたらゲームクリア
+         */
+        function checkWin() {
+            let activeBlocks = 0;
+            for (let c = 0; c < brickColumnCount; c++) {
+                for (let r = 0; r < brickRowCount; r++) {
+                    if (bricks[c][r].status === 1) {
+                        activeBlocks++;
+                    }
+                }
+            }
+            if (activeBlocks === 0) {
+                gameWon = true; // ゲームクリアフラグを立てる
+                gameRunning = false; // ゲームを停止
+                playSound('gameClear'); // ゲームクリア音を再生
+                document.getElementById('finalScoreGameClear').textContent = score; // 最終スコアを表示
+                document.getElementById('gameClearScreen').classList.remove('hidden'); // ゲームクリア画面を表示
+                saveScore(); // スコアを保存
+            }
+        }
+
+        // === メインゲームループ ===
+        /**
+         * ゲームのメインループ関数
+         * requestAnimationFrameにより毎フレーム呼び出される
+         */
+        function loop() {
+            // ゲームオーバー、ゲームクリア、一時停止、またはゲームが実行中でない場合はループを停止
+            if (gameOver || gameWon || isPaused || !gameRunning) {
+                cancelAnimationFrame(animationFrameId);
+                return;
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height); // キャンバスをクリア
+
+            // 各要素の描画
+            drawBricks();
+            drawPaddle();
+            drawBall();
+            drawParticles();
+
+            // 各要素の状態更新
+            movePaddle();
+            moveBall();
+            collisionDetection();
+
+            // 次のフレームでループ関数を再度呼び出す
+            animationFrameId = requestAnimationFrame(loop);
+        }
+
+        // === Firebaseスコア管理関数 ===
+        /**
+         * 現在のスコアをFirebase Firestoreに保存する
+         */
+        async function saveScore() {
+            // Firebaseが未準備またはユーザーが未認証の場合は保存しない
+            if (!isAuthReady || !userId) {
+                console.warn("Firebase is not ready or user is not authenticated. Score not saved.");
+                return;
+            }
+
+            try {
+                // window.firestoreAddDoc を使用する
+                await window.firestoreAddDoc(publicScoresRef, {
+                    userId: userId,
+                    score: score,
+                    timestamp: Date.now() // スコアが記録されたタイムスタンプ
+                });
+                console.log("Score saved successfully!");
+                loadHighScores(); // スコア保存後にランキングを更新
+            } catch (e) {
+                console.error("Error adding document to Firestore: ", e);
+            }
+        }
+
+        /**
+         * Firebase Firestoreからハイスコアをロードし、ランキングテーブルに表示する
+         * onSnapshotによりリアルタイムで更新される
+         */
+        function loadHighScores() {
+            // Firebaseが未準備の場合はロードしない
+            if (!isAuthReady) {
+                console.warn("Firebase is not ready. Cannot load scores.");
+                return;
+            }
+
+            const loadingScoresDiv = document.getElementById('loadingScores');
+            loadingScoresDiv.textContent = "スコアを読み込み中...";
+            loadingScoresDiv.classList.remove('hidden'); // ローディング表示
+
+            // スコアを取得するためのクエリを作成
+            // window.firestoreQuery と window.firestoreLimit を使用する
+            const q = window.firestoreQuery(publicScoresRef, window.firestoreLimit(10));
+
+            // リアルタイムリスナーを設定
+            // window.firestoreOnSnapshot を使用する
+            window.firestoreOnSnapshot(q, (snapshot) => {
+                const scores = [];
+                snapshot.forEach((doc) => {
+                    // 各ドキュメントのデータを取得
+                    scores.push(doc.data());
+                });
+
+                // スコアを降順でソート（クライアントサイドでのソート）
+                scores.sort((a, b) => b.score - a.score);
+
+                const scoreTableBody = document.getElementById('scoreTableBody');
+                scoreTableBody.innerHTML = ''; // 既存のスコア表示をクリア
+
+                if (scores.length === 0) {
+                    // スコアがない場合のメッセージ
+                    scoreTableBody.innerHTML = '<tr><td colspan="3" class="text-center text-gray-400 py-2">まだスコアがありません。</td></tr>';
+                    loadingScoresDiv.classList.add('hidden');
+                    return;
+                }
+
+                // ソートされたスコアをテーブルに追加
+                scores.forEach((s, index) => {
+                    const row = scoreTableBody.insertRow();
+                    row.insertCell(0).textContent = index + 1; // 順位
+                    // ユーザーIDは長いため、表示用に短縮する
+                    row.insertCell(1).textContent = s.userId ? (s.userId.substring(0, 8) + '...') : '匿名ユーザー';
+                    row.insertCell(2).textContent = s.score; // スコア
+                });
+                loadingScoresDiv.classList.add('hidden'); // ローディングを非表示にする
+            }, (error) => {
+                console.error("Error loading high scores: ", error);
+                loadingScoresDiv.textContent = "スコアの読み込みに失敗しました。"; // エラーメッセージ表示
+            });
+        }
+
+        // === ゲーム開始 ===
+        // ウィンドウが完全にロードされたらゲームを初期化する
+        window.onload = initGame;
+    </script>
+</body>
+</html>
